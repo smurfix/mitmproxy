@@ -12,3 +12,9 @@ mitmdumpc
 .coverage
 netlib
 libpathod
+debian/files
+debian/*.log
+debian/mitmproxy
+debian/python-module-stampdir
+debian/*.substvars
+debian/*.debhelper

@@ -1,3 +1,9 @@
+mitmproxy (0.9.1-0.1) sid; urgency=low
+
+  * gitignore Debian packaging intermediates
+
+ -- Matthias Urlichs <matthias@urlichs.de>  Thu, 20 Jun 2013 12:55:35 +0200
+
 mitmproxy (0.9.1-0) sid; urgency=low
 
   * Package current version.
