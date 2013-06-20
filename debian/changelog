@@ -1,3 +1,9 @@
+mitmproxy (0.9.1-0.3) smurf; urgency=low
+
+  * Arch: ANY, if you please.
+
+ -- Matthias Urlichs <matthias@urlichs.de>  Thu, 20 Jun 2013 22:18:03 +0200
+
 mitmproxy (0.9.1-0.2) smurf; urgency=low
 
   * Fixed distribution
