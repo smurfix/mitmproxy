@@ -936,6 +936,15 @@ class TestRequest:
         r.encode("gzip")
         assert r.get_decoded_content() == "falafel"
 
+        r.headers["content-encoding"] = ["gzip"]
+        r.set_encoded_content("some random test")
+        assert r.headers["content-encoding"] == ["gzip"]
+        assert r.get_decoded_content() == "some random test"
+
+        r.set_encoded_content("some more random text", "unsupported")
+        assert r.headers["content-encoding"] == ["identity"]
+        assert r.content == "some more random text"
+
     def test_get_cookies_none(self):
         h = flow.ODictCaseless()
         c = flow.ClientConnect(("addr", 2222))

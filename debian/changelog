@@ -1,3 +1,9 @@
+mitmproxy (0.9.1-0.5) smurf; urgency=low
+
+  * Replace encode() with set_encoded_content()
+
+ -- Matthias Urlichs <matthias@urlichs.de>  Fri, 28 Jun 2013 13:28:37 +0200
+
 mitmproxy (0.9.1-0.4) smurf; urgency=low
 
   * proxy.py: Catch channel.ask() returning None when terminating
