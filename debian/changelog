@@ -1,3 +1,9 @@
+mitmproxy (0.9.1-0.4) smurf; urgency=low
+
+  * proxy.py: Catch channel.ask() returning None when terminating
+
+ -- Matthias Urlichs <matthias@urlichs.de>  Fri, 28 Jun 2013 07:56:13 +0200
+
 mitmproxy (0.9.1-0.3) smurf; urgency=low
 
   * Arch: ANY, if you please.
