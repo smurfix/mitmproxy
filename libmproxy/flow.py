@@ -216,6 +216,21 @@ class HTTPMsg(StateObject):
             return self.content
         return encoding.decode(ce, self.content)
 
+    def set_encoded_content(self, content, ce=None):
+        """
+            Sets the encoded content based on the supplied or current Content-Encoding header.
+            Sets Content-Encoding to "identity" if the supplied encoding is not supported.
+        """
+        if ce is None:
+            ce = self.headers.get_first("content-encoding")
+        else:
+            self.headers["content-encoding"] = [ce]
+        if ce in encoding.ENCODINGS:
+            content = encoding.encode(ce, content)
+        else:
+            self.headers["content-encoding"] = ["identity"]
+        self.content = content
+
     def decode(self):
         """
             Decodes content based on the current Content-Encoding header, then
@@ -237,6 +252,7 @@ class HTTPMsg(StateObject):
             or "identity".
         """
         # FIXME: Error if there's an existing encoding header?
+        # TODO: Deprecate this method; use set_encoded_content() instead
         self.content = encoding.encode(e, self.content)
         self.headers["content-encoding"] = [e]
 
