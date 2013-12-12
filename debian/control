@@ -9,7 +9,7 @@ Vcs-Browser: http://git.debian.org/?p=collab-maint/mitmproxy.git
 
 Package: mitmproxy
 Architecture: all
-Depends: ${misc:Depends}, ${python:Depends}, ${shlibs:Depends}, python-urwid, python-openssl, python-pyasn1, python-imaging, python-lxml, python-netlib (>= 0.9~), python-flask (>= 0.9~)
+Depends: ${misc:Depends}, ${python:Depends}, ${shlibs:Depends}, python-urwid (>= 1.1~), python-openssl (>= 0.13~), python-pyasn1 (>= 0.1.2~), python-imaging, python-lxml, python-netlib (>= 0.9.2~), python-flask (>= 0.9~)
 Provides: ${python:Provides}
 Description: SSL-capable man-in-the-middle HTTP proxy
  mitmproxy is an SSL-capable man-in-the-middle HTTP proxy. It provides
