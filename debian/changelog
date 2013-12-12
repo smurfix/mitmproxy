@@ -1,3 +1,9 @@
+mitmproxy (0.10.0~git-2) smurf; urgency=low
+
+  * Merge serverconnect change
+
+ -- Matthias Urlichs <matthias@urlichs.de>  Thu, 12 Dec 2013 08:01:31 +0100
+
 mitmproxy (0.10.0~git-1) smurf; urgency=low
 
   * Upstream Merge.
