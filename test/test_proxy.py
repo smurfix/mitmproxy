@@ -56,7 +56,7 @@ class TestServerConnection:
         sc = proxy.ServerConnection(proxy.ProxyConfig(), "http", self.d.IFACE, self.d.port, "host.com")
         sc.connect()
         sc.connection = mock.Mock()
-        sc.connection.close = mock.Mock(side_effect=IOError)
+        sc.connection.flush = mock.Mock(side_effect=tcp.NetLibDisconnect)
         sc.terminate()
 
 
@@ -116,9 +116,6 @@ class TestProcessProxyOptions:
             self.assert_noerr("--client-certs", confdir)
             self.assert_err("directory does not exist", "--client-certs", "nonexistent")
 
-            self.assert_noerr("--dummy-certs", confdir)
-            self.assert_err("directory does not exist", "--dummy-certs", "nonexistent")
-
     def test_auth(self):
         p = self.assert_noerr("--nonanonymous")
         assert p.authenticator
@@ -133,6 +130,7 @@ class TestProcessProxyOptions:
 
 
 class TestProxyServer:
+    @tutils.SkipWindows # binding to 0.0.0.0:1 works without special permissions on Windows
     def test_err(self):
         parser = argparse.ArgumentParser()
         cmdline.common_options(parser)

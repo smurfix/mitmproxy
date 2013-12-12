@@ -1,18 +1,3 @@
-# Copyright (C) 2012  Aldo Cortesi
-#
-# This program is free software: you can redistribute it and/or modify
-# it under the terms of the GNU General Public License as published by
-# the Free Software Foundation, either version 3 of the License, or
-# (at your option) any later version.
-#
-# This program is distributed in the hope that it will be useful,
-# but WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-# GNU General Public License for more details.
-#
-# You should have received a copy of the GNU General Public License
-# along with this program.  If not, see <http://www.gnu.org/licenses/>.
-
 import sys, os
 import netlib.utils
 import flow, filt, utils
@@ -23,8 +8,9 @@ class DumpError(Exception): pass
 class Options(object):
     attributes = [
         "app",
-        "app_domain",
-        "app_ip", 
+        "app_external",
+        "app_host",
+        "app_port",
         "anticache",
         "anticomp",
         "client_replay",
@@ -39,7 +25,7 @@ class Options(object):
         "rheaders",
         "setheaders",
         "server_replay",
-        "script",
+        "scripts",
         "showhost",
         "stickycookie",
         "stickyauth",
@@ -124,8 +110,9 @@ class DumpMaster(flow.FlowMaster):
                 not options.keepserving
             )
 
-        if options.script:
-            err = self.load_script(options.script)
+        scripts = options.scripts or []
+        for script_argv in scripts:
+            err = self.load_script(script_argv)
             if err:
                 raise DumpError(err)
 
@@ -142,7 +129,7 @@ class DumpMaster(flow.FlowMaster):
                 self.add_event("Flow file corrupted. Stopped loading.")
 
         if self.o.app:
-            self.start_app(self.o.app_domain, self.o.app_ip)
+            self.start_app(self.o.app_host, self.o.app_port, self.o.app_external)
 
     def _readflow(self, path):
         path = os.path.expanduser(path)
@@ -236,8 +223,8 @@ class DumpMaster(flow.FlowMaster):
 
     def run(self):  # pragma: no cover
         if self.o.rfile and not self.o.keepserving:
-            if self.script:
-                self.load_script(None)
+            for script in self.scripts:
+                self.unload_script(script)
             return
         try:
             return flow.FlowMaster.run(self)

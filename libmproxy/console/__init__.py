@@ -1,18 +1,3 @@
-# Copyright (C) 2010  Aldo Cortesi
-#
-# This program is free software: you can redistribute it and/or modify
-# it under the terms of the GNU General Public License as published by
-# the Free Software Foundation, either version 3 of the License, or
-# (at your option) any later version.
-#
-# This program is distributed in the hope that it will be useful,
-# but WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-# GNU General Public License for more details.
-#
-# You should have received a copy of the GNU General Public License
-# along with this program.  If not, see <http://www.gnu.org/licenses/>.
-
 import mailcap, mimetypes, tempfile, os, subprocess, glob, time, shlex, stat
 import os.path, sys, weakref
 import urwid
@@ -188,7 +173,7 @@ class StatusBar(common.WWrap):
         if opts:
             r.append("[%s]"%(":".join(opts)))
 
-        if self.master.script:
+        if self.master.scripts:
             r.append("[script:%s]"%self.master.script.path)
 
         if self.master.debug:
@@ -204,7 +189,10 @@ class StatusBar(common.WWrap):
             self.message("")
 
         fc = self.master.state.flow_count()
-        offset = min(self.master.state.focus + 1, fc)
+        if self.master.state.focus is None:
+            offset = 0
+        else:
+            offset = min(self.master.state.focus + 1, fc)
         t = [
             ('heading', ("[%s/%s]"%(offset, fc)).ljust(9))
         ]
@@ -323,6 +311,8 @@ class ConsoleState(flow.State):
     def delete_flow(self, f):
         if f in self.view and self.view.index(f) <= self.focus:
             self.focus -= 1
+        if self.focus < 0:
+            self.focus = None
         ret = flow.State.delete_flow(self, f)
         self.set_focus(self.focus)
         return ret
@@ -433,7 +423,7 @@ class ConsoleMaster(flow.FlowMaster):
                 sys.exit(1)
 
         if options.app:
-            self.start_app(options.app_domain, options.app_ip)
+            self.start_app(self.o.app_host, self.o.app_port, self.o.app_external)
 
     def start_stream(self, path):
         path = os.path.expanduser(path)
@@ -469,7 +459,7 @@ class ConsoleMaster(flow.FlowMaster):
             self._run_script_method("response", s, f)
         if f.error:
             self._run_script_method("error", s, f)
-        s.run("done")
+        s.unload()
         self.refresh_flow(f)
         self.state.last_script = path
 
@@ -890,7 +880,7 @@ class ConsoleMaster(flow.FlowMaster):
                                     )
                                 )
                             elif k == "s":
-                                if self.script:
+                                if self.scripts:
                                     self.load_script(None)
                                 else:
                                     self.path_prompt(

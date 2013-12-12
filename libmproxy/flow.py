@@ -1,23 +1,8 @@
-# Copyright (C) 2012  Aldo Cortesi
-#
-# This program is free software: you can redistribute it and/or modify
-# it under the terms of the GNU General Public License as published by
-# the Free Software Foundation, either version 3 of the License, or
-# (at your option) any later version.
-#
-# This program is distributed in the hope that it will be useful,
-# but WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-# GNU General Public License for more details.
-#
-# You should have received a copy of the GNU General Public License
-# along with this program.  If not, see <http://www.gnu.org/licenses/>.
-
 """
     This module provides more sophisticated flow tracking. These match requests
     with their responses, and provide filtering and interception facilities.
 """
-import hashlib, Cookie, cookielib, copy, re, urlparse, os
+import hashlib, Cookie, cookielib, copy, re, urlparse, os, threading
 import time, urllib
 import tnetstring, filt, script, utils, encoding, proxy
 from email.utils import parsedate_tz, formatdate, mktime_tz
@@ -236,15 +221,21 @@ class HTTPMsg(StateObject):
             Decodes content based on the current Content-Encoding header, then
             removes the header. If there is no Content-Encoding header, no
             action is taken.
+
+            Returns True if decoding succeeded, False otherwise.
         """
         ce = self.headers.get_first("content-encoding")
         if not self.content or ce not in encoding.ENCODINGS:
-            return
-        self.content = encoding.decode(
+            return False
+        data = encoding.decode(
             ce,
             self.content
         )
+        if data is None:
+            return False
+        self.content = data
         del self.headers["content-encoding"]
+        return True
 
     def encode(self, e):
         """
@@ -313,7 +304,9 @@ class Request(HTTPMsg):
             (or None, if request didn't results SSL setup)
 
     """
-    def __init__(self, client_conn, httpversion, host, port, scheme, method, path, headers, content, timestamp_start=None, timestamp_end=None, tcp_setup_timestamp=None, ssl_setup_timestamp=None):
+    def __init__(
+            self, client_conn, httpversion, host, port, scheme, method, path, headers, content, timestamp_start=None,
+            timestamp_end=None, tcp_setup_timestamp=None, ssl_setup_timestamp=None, ip=None):
         assert isinstance(headers, ODictCaseless)
         self.client_conn = client_conn
         self.httpversion = httpversion
@@ -324,6 +317,7 @@ class Request(HTTPMsg):
         self.close = False
         self.tcp_setup_timestamp = tcp_setup_timestamp
         self.ssl_setup_timestamp = ssl_setup_timestamp
+        self.ip = ip
 
         # Have this request's cookies been modified by sticky cookies or auth?
         self.stickycookie = False
@@ -389,6 +383,7 @@ class Request(HTTPMsg):
         self.timestamp_end = state["timestamp_end"]
         self.tcp_setup_timestamp = state["tcp_setup_timestamp"]
         self.ssl_setup_timestamp = state["ssl_setup_timestamp"]
+        self.ip = state["ip"]
 
     def _get_state(self):
         return dict(
@@ -404,7 +399,8 @@ class Request(HTTPMsg):
             timestamp_start = self.timestamp_start,
             timestamp_end = self.timestamp_end,
             tcp_setup_timestamp = self.tcp_setup_timestamp,
-            ssl_setup_timestamp = self.ssl_setup_timestamp
+            ssl_setup_timestamp = self.ssl_setup_timestamp,
+            ip = self.ip
         )
 
     @classmethod
@@ -422,7 +418,8 @@ class Request(HTTPMsg):
             state["timestamp_start"],
             state["timestamp_end"],
             state["tcp_setup_timestamp"],
-            state["ssl_setup_timestamp"]
+            state["ssl_setup_timestamp"],
+            state["ip"]
         )
 
     def __hash__(self):
@@ -643,7 +640,7 @@ class Response(HTTPMsg):
         self.headers, self.content = headers, content
         self.cert = cert
         self.timestamp_start = timestamp_start or utils.timestamp()
-        self.timestamp_end = max(timestamp_end or utils.timestamp(), timestamp_start)
+        self.timestamp_end = timestamp_end or utils.timestamp()
         self.replay = False
 
     def _refresh_cookie(self, c, delta):
@@ -754,6 +751,8 @@ class Response(HTTPMsg):
         )
         if self.content:
             headers["Content-Length"] = [str(len(self.content))]
+        elif 'Transfer-Encoding' in self.headers:
+            headers["Content-Length"] = ["0"]
         proto = "HTTP/%s.%s %s %s"%(self.httpversion[0], self.httpversion[1], self.code, str(self.msg))
         data = (proto, str(headers))
         return FMT%data
@@ -1374,7 +1373,7 @@ class FlowMaster(controller.Master):
         self.server_playback = None
         self.client_playback = None
         self.kill_nonreplay = False
-        self.script = None
+        self.scripts = []
         self.pause_scripts = False
 
         self.stickycookie_state = False
@@ -1392,17 +1391,19 @@ class FlowMaster(controller.Master):
         self.stream = None
         app.mapp.config["PMASTER"] = self
 
-    def start_app(self, domain, ip):
-        self.server.apps.add(
-            app.mapp,
-            domain,
-            80
-        )
-        self.server.apps.add(
-            app.mapp,
-            ip,
-            80
-        )
+    def start_app(self, host, port, external):
+        if not external:
+            self.server.apps.add(
+                app.mapp,
+                host,
+                port
+            )
+        else:
+            print host
+            threading.Thread(target=app.mapp.run,kwargs={
+                "use_reloader": False,
+                "host": host,
+                "port": port}).start()
 
     def add_event(self, e, level="info"):
         """
@@ -1410,37 +1411,43 @@ class FlowMaster(controller.Master):
         """
         pass
 
-    def get_script(self, path):
+    def get_script(self, script_argv):
         """
             Returns an (error, script) tuple.
         """
-        s = script.Script(path, ScriptContext(self))
+        s = script.Script(script_argv, ScriptContext(self))
         try:
             s.load()
         except script.ScriptError, v:
             return (v.args[0], None)
-        ret = s.run("start")
-        if not ret[0] and ret[1]:
-            return ("Error in script start:\n\n" + ret[1][1], None)
         return (None, s)
 
-    def load_script(self, path):
+    def unload_script(self,script):
+        script.unload()
+        self.scripts.remove(script)
+
+    def load_script(self, script_argv):
         """
             Loads a script. Returns an error description if something went
-            wrong. If path is None, the current script is terminated.
+            wrong.
         """
-        if path is None:
-            self.run_script_hook("done")
-            self.script = None
+        r = self.get_script(script_argv)
+        if r[0]:
+            return r[0]
         else:
-            r = self.get_script(path)
-            if r[0]:
-                return r[0]
-            else:
-                if self.script:
-                    self.run_script_hook("done")
-                self.script = r[1]
+            self.scripts.append(r[1])
 
+    def run_single_script_hook(self, script, name, *args, **kwargs):
+        if script and not self.pause_scripts:
+            ret = script.run(name, *args, **kwargs)
+            if not ret[0] and ret[1]:
+                e = "Script error:\n" + ret[1][1]
+                self.add_event(e, "error")
+
+    def run_script_hook(self, name, *args, **kwargs):
+        for script in self.scripts:
+            self.run_single_script_hook(script, name, *args, **kwargs)
+      
     def set_stickycookie(self, txt):
         if txt:
             flt = filt.parse(txt)
@@ -1590,13 +1597,6 @@ class FlowMaster(controller.Master):
             if block:
                 rt.join()
 
-    def run_script_hook(self, name, *args, **kwargs):
-        if self.script and not self.pause_scripts:
-            ret = self.script.run(name, *args, **kwargs)
-            if not ret[0] and ret[1]:
-                e = "Script error:\n" + ret[1][1]
-                self.add_event(e, "error")
-
     def handle_clientconnect(self, cc):
         self.run_script_hook("clientconnect", cc)
         cc.reply()
@@ -1604,6 +1604,13 @@ class FlowMaster(controller.Master):
     def handle_clientdisconnect(self, r):
         self.run_script_hook("clientdisconnect", r)
         r.reply()
+
+    def handle_serverconnection(self, sc):
+        # To unify the mitmproxy script API, we call the script hook "serverconnect" rather than "serverconnection".
+        # As things are handled differently in libmproxy (ClientConnect + ClientDisconnect vs ServerConnection class),
+        # there is no "serverdisonnect" event at the moment.
+        self.run_script_hook("serverconnect", sc)
+        sc.reply()
 
     def handle_error(self, r):
         f = self.state.add_error(r)
@@ -1638,8 +1645,8 @@ class FlowMaster(controller.Master):
         return f
 
     def shutdown(self):
-        if self.script:
-            self.load_script(None)
+        for script in self.scripts:
+            self.unload_script(script)
         controller.Master.shutdown(self)
         if self.stream:
             for i in self.state._flow_list:

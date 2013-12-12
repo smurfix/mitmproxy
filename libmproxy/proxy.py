@@ -1,17 +1,3 @@
-# Copyright (C) 2012  Aldo Cortesi
-#
-# This program is free software: you can redistribute it and/or modify
-# it under the terms of the GNU General Public License as published by
-# the Free Software Foundation, either version 3 of the License, or
-# (at your option) any later version.
-#
-# This program is distributed in the hope that it will be useful,
-# but WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-# GNU General Public License for more details.
-#
-# You should have received a copy of the GNU General Public License
-# along with this program.  If not, see <http://www.gnu.org/licenses/>.
 import sys, os, string, socket, time
 import shutil, tempfile, threading
 import SocketServer
@@ -37,16 +23,17 @@ class Log:
 
 
 class ProxyConfig:
-    def __init__(self, certfile = None, cacert = None, clientcerts = None, no_upstream_cert=False, body_size_limit = None, reverse_proxy=None, transparent_proxy=None, certdir = None, authenticator=None):
+    def __init__(self, certfile = None, cacert = None, clientcerts = None, no_upstream_cert=False, body_size_limit = None, reverse_proxy=None, forward_proxy=None, transparent_proxy=None, authenticator=None):
         self.certfile = certfile
         self.cacert = cacert
         self.clientcerts = clientcerts
         self.no_upstream_cert = no_upstream_cert
         self.body_size_limit = body_size_limit
         self.reverse_proxy = reverse_proxy
+        self.forward_proxy = forward_proxy
         self.transparent_proxy = transparent_proxy
         self.authenticator = authenticator
-        self.certstore = certutils.CertStore(certdir)
+        self.certstore = certutils.CertStore()
 
 
 class ServerConnection(tcp.TCPClient):
@@ -85,12 +72,9 @@ class ServerConnection(tcp.TCPClient):
         if self.connection:
             try:
                 self.wfile.flush()
-            except IOError: # pragma: no cover
+            except tcp.NetLibDisconnect: # pragma: no cover
                 pass
-            try:
-                self.connection.close()
-            except IOError:
-                pass
+            self.connection.close()
 
 
 
@@ -105,11 +89,13 @@ class RequestReplayThread(threading.Thread):
             server = ServerConnection(self.config, r.scheme, r.host, r.port, r.host)
             server.connect()
             server.send(r)
+            tsstart = utils.timestamp()
             httpversion, code, msg, headers, content = http.read_response(
                 server.rfile, r.method, self.config.body_size_limit
             )
             response = flow.Response(
-                self.flow.request, httpversion, code, msg, headers, content, server.cert
+                self.flow.request, httpversion, code, msg, headers, content, server.cert, 
+                server.rfile.first_byte_timestamp
             )
             self.channel.ask(response)
         except (ProxyError, http.HttpError, tcp.NetLibError), v:
@@ -129,7 +115,7 @@ class HandleSNI:
                 self.handler.get_server_connection(self.client_conn, "https", self.host, self.port, sn)
                 new_context = SSL.Context(SSL.TLSv1_METHOD)
                 new_context.use_privatekey_file(self.key)
-                new_context.use_certificate_file(self.cert)
+                new_context.use_certificate(self.cert.x509)
                 connection.set_context(new_context)
                 self.handler.sni = sn.decode("utf8").encode("idna")
         # An unhandled exception in this method will core dump PyOpenSSL, so
@@ -173,6 +159,7 @@ class ProxyHandler(tcp.BaseHandler):
         if not self.server_conn:
             try:
                 self.server_conn = ServerConnection(self.config, scheme, host, port, sni)
+                self.channel.ask(self.server_conn)
                 self.server_conn.connect()
             except tcp.NetLibError, v:
                 raise ProxyError(502, v)
@@ -226,6 +213,8 @@ class ProxyHandler(tcp.BaseHandler):
                     request = request_reply
                     if self.config.reverse_proxy:
                         scheme, host, port = self.config.reverse_proxy
+                    elif self.config.forward_proxy:
+                        scheme, host, port = self.config.forward_proxy
                     else:
                         scheme, host, port = request.scheme, request.host, request.port
 
@@ -241,6 +230,10 @@ class ProxyHandler(tcp.BaseHandler):
                             request.ssl_setup_timestamp = sc.ssl_setup_timestamp
                         sc.rfile.reset_timestamps()
                         try:
+                            tsstart = utils.timestamp()
+                            peername = sc.connection.getpeername()
+                            if peername:
+                                request.ip = peername[0]
                             httpversion, code, msg, headers, content = http.read_response(
                                 sc.rfile,
                                 request.method,
@@ -259,7 +252,7 @@ class ProxyHandler(tcp.BaseHandler):
 
                     response = flow.Response(
                         request, httpversion, code, msg, headers, content, sc.cert,
-                        sc.rfile.first_byte_timestamp, utils.timestamp()
+                        sc.rfile.first_byte_timestamp
                     )
                     response_reply = self.channel.ask(response)
                     # Not replying to the server invalidates the server
@@ -272,15 +265,15 @@ class ProxyHandler(tcp.BaseHandler):
                 else:
                     response = response_reply
                     self.send_response(response)
-                    if request and http.request_connection_close(request.httpversion, request.headers):
+                    if request and http.connection_close(request.httpversion, request.headers):
                         return
                     # We could keep the client connection when the server
                     # connection needs to go away.  However, we want to mimic
                     # behaviour as closely as possible to the client, so we
                     # disconnect.
-                    if http.response_connection_close(response.httpversion, response.headers):
+                    if http.connection_close(response.httpversion, response.headers):
                         return
-        except (IOError, ProxyError, http.HttpError, tcp.NetLibDisconnect), e:
+        except (IOError, ProxyError, http.HttpError, tcp.NetLibError), e:
             if hasattr(e, "code"):
                 cc.error = "%s: %s"%(e.code, e.msg)
             else:
@@ -312,17 +305,30 @@ class ProxyHandler(tcp.BaseHandler):
 
     def find_cert(self, cc, host, port, sni):
         if self.config.certfile:
-            return self.config.certfile
+            with open(self.config.certfile, "rb") as f:
+                return certutils.SSLCert.from_pem(f.read())
         else:
             sans = []
             if not self.config.no_upstream_cert:
                 conn = self.get_server_connection(cc, "https", host, port, sni)
                 sans = conn.cert.altnames
-                host = conn.cert.cn.decode("utf8").encode("idna")
+                if conn.cert.cn:
+                    host = conn.cert.cn.decode("utf8").encode("idna")
             ret = self.config.certstore.get_cert(host, sans, self.config.cacert)
             if not ret:
                 raise ProxyError(502, "Unable to generate dummy cert.")
             return ret
+
+    def establish_ssl(self, client_conn, host, port):
+        dummycert = self.find_cert(client_conn, host, port, host)
+        sni = HandleSNI(
+            self, client_conn, host, port,
+            dummycert, self.config.certfile or self.config.cacert
+        )
+        try:
+            self.convert_to_ssl(dummycert, self.config.certfile or self.config.cacert, handle_sni=sni)
+        except tcp.NetLibError, v:
+            raise ProxyError(400, str(v))
 
     def get_line(self, fp):
         """
@@ -342,18 +348,21 @@ class ProxyHandler(tcp.BaseHandler):
         host, port = orig
         if port in self.config.transparent_proxy["sslports"]:
             scheme = "https"
-            if not self.ssl_established:
-                dummycert = self.find_cert(client_conn, host, port, host)
-                sni = HandleSNI(
-                    self, client_conn, host, port,
-                    dummycert, self.config.certfile or self.config.cacert
-                )
-                try:
-                    self.convert_to_ssl(dummycert, self.config.certfile or self.config.cacert, handle_sni=sni)
-                except tcp.NetLibError, v:
-                    raise ProxyError(400, str(v))
         else:
             scheme = "http"
+
+        return self._read_request_transparent(client_conn, scheme, host, port)
+
+    def _read_request_transparent(self, client_conn, scheme, host, port):
+        """
+        Read a transparent HTTP request. Transparent means that the client isn't aware of proxying.
+        In other words, the client request starts with
+        "GET /foo.html HTTP/1.1"
+        rather than
+        "CONNECT example.com:80 HTTP/1.1"
+        """
+        if scheme.lower() == "https" and not self.ssl_established:
+            self.establish_ssl(client_conn, host, port)
         line = self.get_line(self.rfile)
         if line == "":
             return None
@@ -386,15 +395,7 @@ class ProxyHandler(tcp.BaseHandler):
                             '\r\n'
                             )
                 self.wfile.flush()
-                dummycert = self.find_cert(client_conn, host, port, host)
-                sni = HandleSNI(
-                    self, client_conn, host, port,
-                    dummycert, self.config.certfile or self.config.cacert
-                )
-                try:
-                    self.convert_to_ssl(dummycert, self.config.certfile or self.config.cacert, handle_sni=sni)
-                except tcp.NetLibError, v:
-                    raise ProxyError(400, str(v))
+                self.establish_ssl(client_conn, host, port)
                 self.proxy_connect_state = (host, port, httpversion)
                 line = self.rfile.readline(line)
 
@@ -428,22 +429,8 @@ class ProxyHandler(tcp.BaseHandler):
                     )
 
     def read_request_reverse(self, client_conn):
-        line = self.get_line(self.rfile)
-        if line == "":
-            return None
         scheme, host, port = self.config.reverse_proxy
-        r = http.parse_init_http(line)
-        if not r:
-            raise ProxyError(400, "Bad HTTP request line: %s"%repr(line))
-        method, path, httpversion = r
-        headers = self.read_headers(authenticate=False)
-        content = http.read_http_body_request(
-                    self.rfile, self.wfile, headers, httpversion, self.config.body_size_limit
-                )
-        return flow.Request(
-                    client_conn, httpversion, host, port, "http", method, path, headers, content,
-                    self.rfile.first_byte_timestamp, utils.timestamp()
-               )
+        return self._read_request_transparent(client_conn, scheme, host, port)
 
     def read_request(self, client_conn):
         self.rfile.reset_timestamps()
@@ -484,8 +471,9 @@ class ProxyHandler(tcp.BaseHandler):
             self.wfile.write("Server: %s\r\n"%self.server_version)
             self.wfile.write("Content-type: text/html\r\n")
             self.wfile.write("Content-Length: %d\r\n"%len(html_content))
-            for key, value in headers.items():
-                self.wfile.write("%s: %s\r\n"%(key, value))
+            if headers:
+                for key, value in headers.items():
+                    self.wfile.write("%s: %s\r\n"%(key, value))
             self.wfile.write("Connection: close\r\n")
             self.wfile.write("\r\n")
             self.wfile.write(html_content)
@@ -524,9 +512,6 @@ class ProxyServer(tcp.TCPServer):
         h = ProxyHandler(self.config, request, client_address, self, self.channel, self.server_version)
         h.handle()
         h.finish()
-
-    def handle_shutdown(self):
-        self.config.certstore.cleanup()
 
 
 class AppRegistry:
@@ -576,11 +561,6 @@ def certificate_option_group(parser):
         type = str, dest = "clientcerts", default=None,
         help = "Client certificate directory."
     )
-    group.add_argument(
-        "--dummy-certs", action="store",
-        type = str, dest = "certdir", default=None,
-        help = "Generated dummy certs directory."
-    )
 
 
 TRANSPARENT_SSL_PORTS = [443, 8443]
@@ -616,15 +596,17 @@ def process_proxy_options(parser, options):
     else:
         rp = None
 
+    if options.forward_proxy:
+        fp = utils.parse_proxy_spec(options.forward_proxy)
+        if not fp:
+            return parser.error("Invalid forward proxy specification: %s"%options.forward_proxy)
+    else:
+        fp = None
+
     if options.clientcerts:
         options.clientcerts = os.path.expanduser(options.clientcerts)
         if not os.path.exists(options.clientcerts) or not os.path.isdir(options.clientcerts):
             return parser.error("Client certificate directory does not exist or is not a directory: %s"%options.clientcerts)
-
-    if options.certdir:
-        options.certdir = os.path.expanduser(options.certdir)
-        if not os.path.exists(options.certdir) or not os.path.isdir(options.certdir):
-            return parser.error("Dummy cert directory does not exist or is not a directory: %s"%options.certdir)
 
     if (options.auth_nonanonymous or options.auth_singleuser or options.auth_htpasswd):
         if options.auth_singleuser:
@@ -650,7 +632,7 @@ def process_proxy_options(parser, options):
         body_size_limit = body_size_limit,
         no_upstream_cert = options.no_upstream_cert,
         reverse_proxy = rp,
+        forward_proxy = fp,
         transparent_proxy = trans,
-        certdir = options.certdir,
         authenticator = authenticator
     )

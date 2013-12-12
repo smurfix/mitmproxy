@@ -10,6 +10,7 @@ MANIFEST
 mitmproxyc
 mitmdumpc
 .coverage
+.idea
 netlib
 libpathod
 debian/files
