@@ -1,4 +1,4 @@
-mitmproxy (0.10.0~git-5) smurf; urgency=low
+mitmproxy (0.10.0~git-6) smurf; urgency=low
 
   * Merge serverconnect change
 
